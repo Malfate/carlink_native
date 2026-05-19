@@ -50,13 +50,13 @@ import com.carlink.media.MediaSessionManager
 import com.carlink.util.LogCallback
 import com.carlink.navigation.NavigationStateManager
 import com.carlink.protocol.AdapterConfig
-import com.carlink.protocol.KnownDevices
 import com.carlink.ui.MainScreen
 import com.carlink.ui.SettingsScreen
 import com.carlink.ui.settings.AdapterConfigPreference
 import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.settings.DisplayModePreference
 import com.carlink.ui.theme.CarlinkTheme
+import com.carlink.usb.UsbDeviceWrapper
 import com.carlink.util.IconAssets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -167,8 +167,8 @@ class MainActivity : ComponentActivity() {
      *
      * Provides immediate detection when the Carlinkit adapter is physically
      * disconnected, enabling faster recovery than waiting for USB transfer errors
-     * to surface. Filters to known Carlinkit VID/PID pairs before signaling
-     * [CarlinkManager.onUsbDeviceDetached] — other USB device events are ignored.
+     * to surface. Filters to known or experimental Carlinkit-like USB devices before
+     * signaling [CarlinkManager.onUsbDeviceDetached] — other USB device events are ignored.
      */
     private val usbDetachReceiver =
         object : BroadcastReceiver() {
@@ -186,11 +186,11 @@ class MainActivity : ComponentActivity() {
                         }
 
                     device?.let {
-                        // Only handle if it's a known Carlinkit device
-                        if (KnownDevices.isKnownDevice(it.vendorId, it.productId)) {
+                        // Only handle if it's a known or experimental Carlinkit-like device
+                        if (UsbDeviceWrapper.isKnownOrExperimentalDevice(it)) {
                             logWarn(
-                                "[USB_DETACH] Carlinkit device detached: VID=0x${it.vendorId.toString(16)} " +
-                                    "PID=0x${it.productId.toString(16)} path=${it.deviceName}",
+                                "[USB_DETACH] Carlinkit-like device detached: " +
+                                    UsbDeviceWrapper.describeDevice(it),
                                 tag = "MAIN",
                             )
                             // Notify CarlinkManager of the detachment (null-safe)

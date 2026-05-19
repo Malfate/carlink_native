@@ -84,6 +84,7 @@ class UsbDeviceWrapper(
     val vendorId: Int get() = device.vendorId
     val productId: Int get() = device.productId
     val deviceName: String get() = device.deviceName
+    val isKnownCarlinkitDevice: Boolean get() = KnownDevices.isKnownDevice(device.vendorId, device.productId)
 
     // Performance tracking — atomic because write() is called from multiple threads
     // (heartbeat timer, mic capture timer, frame interval coroutine, UI thread).
@@ -720,6 +721,128 @@ class UsbDeviceWrapper(
     }
 
     companion object {
+        private val experimentalVendorIds = setOf(0x1314, 0x08E4)
+        private val experimentalNameHints =
+            listOf(
+                "autokit",
+                "auto box",
+                "carlink",
+                "carlinkit",
+                "magic communication",
+            )
+
+        private fun hex4(value: Int): String = "0x${value.toString(16).padStart(4, '0')}"
+
+        private fun UsbDevice.safeManufacturerName(): String? =
+            try {
+                manufacturerName
+            } catch (_: Exception) {
+                null
+            }
+
+        private fun UsbDevice.safeProductName(): String? =
+            try {
+                productName
+            } catch (_: Exception) {
+                null
+            }
+
+        private fun UsbDevice.hasBulkInOutInterface(): Boolean {
+            for (i in 0 until interfaceCount) {
+                val iface = getInterface(i)
+                var hasBulkIn = false
+                var hasBulkOut = false
+
+                for (j in 0 until iface.endpointCount) {
+                    val endpoint = iface.getEndpoint(j)
+                    if (endpoint.type == android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_BULK) {
+                        if (endpoint.direction == android.hardware.usb.UsbConstants.USB_DIR_IN) {
+                            hasBulkIn = true
+                        } else {
+                            hasBulkOut = true
+                        }
+                    }
+                }
+
+                if (hasBulkIn && hasBulkOut) return true
+            }
+            return false
+        }
+
+        private fun UsbDevice.looksLikeExperimentalCarlinkit(): Boolean {
+            if (!hasBulkInOutInterface()) return false
+
+            if (vendorId in experimentalVendorIds) return true
+
+            val identityText =
+                listOfNotNull(
+                    safeManufacturerName(),
+                    safeProductName(),
+                    deviceName,
+                ).joinToString(" ").lowercase()
+
+            return experimentalNameHints.any { hint -> hint in identityText }
+        }
+
+        fun isKnownOrExperimentalDevice(device: UsbDevice): Boolean =
+            KnownDevices.isKnownDevice(device.vendorId, device.productId) ||
+                device.looksLikeExperimentalCarlinkit()
+
+        fun describeDevice(device: UsbDevice): String {
+            val interfaces =
+                (0 until device.interfaceCount).joinToString("; ") { i ->
+                    val iface = device.getInterface(i)
+                    val endpoints =
+                        (0 until iface.endpointCount).joinToString(",") { j ->
+                            val endpoint = iface.getEndpoint(j)
+                            val direction =
+                                if (endpoint.direction == android.hardware.usb.UsbConstants.USB_DIR_IN) {
+                                    "IN"
+                                } else {
+                                    "OUT"
+                                }
+                            val type =
+                                when (endpoint.type) {
+                                    android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_BULK -> "bulk"
+                                    android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "control"
+                                    android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_INT -> "interrupt"
+                                    android.hardware.usb.UsbConstants.USB_ENDPOINT_XFER_ISOC -> "iso"
+                                    else -> "type${endpoint.type}"
+                                }
+                            "$direction/$type/${hex4(endpoint.address)}"
+                        }
+                    "iface$i class=${hex4(iface.interfaceClass)} " +
+                        "sub=${hex4(iface.interfaceSubclass)} proto=${hex4(iface.interfaceProtocol)} " +
+                        "eps=[$endpoints]"
+                }
+
+            return "VID=${hex4(device.vendorId)} PID=${hex4(device.productId)} " +
+                "class=${hex4(device.deviceClass)} sub=${hex4(device.deviceSubclass)} " +
+                "proto=${hex4(device.deviceProtocol)} manufacturer=${device.safeManufacturerName() ?: "?"} " +
+                "product=${device.safeProductName() ?: "?"} path=${device.deviceName} interfaces={$interfaces}"
+        }
+
+        fun logConnectedDevices(
+            usbManager: UsbManager,
+            logCallback: (String) -> Unit,
+        ) {
+            val devices = usbManager.deviceList.values.toList()
+            if (devices.isEmpty()) {
+                logCallback("[USB] No USB devices reported by UsbManager")
+                return
+            }
+
+            logCallback("[USB] UsbManager reports ${devices.size} device(s)")
+            devices.forEach { device ->
+                val known = KnownDevices.isKnownDevice(device.vendorId, device.productId)
+                val experimental = !known && device.looksLikeExperimentalCarlinkit()
+                logCallback(
+                    "[USB] Device inventory: ${describeDevice(device)} " +
+                        "known=$known experimentalCandidate=$experimental",
+                )
+            }
+        }
+
         /**
          * Find all connected Carlinkit devices.
          */
@@ -729,14 +852,38 @@ class UsbDeviceWrapper(
             }
 
         /**
+         * Find devices that are not in the known CPC200-CCPA table but look close enough
+         * to try the same bulk protocol. This is intentionally conservative: it requires
+         * both a Carlinkit-like identity signal and the same bulk IN/OUT transport shape.
+         */
+        fun findExperimentalDevices(usbManager: UsbManager): List<UsbDevice> =
+            usbManager.deviceList.values.filter { device ->
+                !KnownDevices.isKnownDevice(device.vendorId, device.productId) &&
+                    device.looksLikeExperimentalCarlinkit()
+            }
+
+        /**
          * Create a wrapper for the first available Carlinkit device.
          */
         fun findFirst(
             context: Context,
             usbManager: UsbManager,
             logCallback: (String) -> Unit,
+            allowExperimental: Boolean = false,
         ): UsbDeviceWrapper? {
-            val device = findDevices(usbManager).firstOrNull() ?: return null
+            val knownDevice = findDevices(usbManager).firstOrNull()
+            if (knownDevice != null) {
+                return UsbDeviceWrapper(context, usbManager, knownDevice, logCallback)
+            }
+
+            val device =
+                if (allowExperimental) {
+                    findExperimentalDevices(usbManager).firstOrNull()?.also {
+                        logCallback("[USB] Trying experimental adapter candidate: ${describeDevice(it)}")
+                    }
+                } else {
+                    null
+                } ?: return null
             return UsbDeviceWrapper(context, usbManager, device, logCallback)
         }
 

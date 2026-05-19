@@ -841,7 +841,16 @@ class CarlinkManager(
 
         log("Device found, opening")
         usbDevice = device
-        setStatusText("Adapter found — opening...")
+        if (device.isKnownCarlinkitDevice) {
+            setStatusText("Adapter found — opening...")
+        } else {
+            setStatusText("Experimental adapter found — opening...")
+            logWarn(
+                "[USB] Opening experimental adapter candidate VID=0x${device.vendorId.toString(16)} " +
+                    "PID=0x${device.productId.toString(16)} path=${device.deviceName}",
+                tag = Logger.Tags.USB,
+            )
+        }
 
         if (!device.openWithPermission()) {
             logError("Failed to open USB device", tag = Logger.Tags.USB)
@@ -1633,11 +1642,38 @@ class CarlinkManager(
     private suspend fun findDevice(): UsbDeviceWrapper? {
         var device: UsbDeviceWrapper? = null
         var attempts = 0
+        var inventoryLogged = false
+        var experimentalAttempted = false
 
         while (device == null && attempts < 10) {
-            device = UsbDeviceWrapper.findFirst(context, usbManager) { log(it) }
+            device = UsbDeviceWrapper.findFirst(context, usbManager, logCallback = { log(it) })
 
             if (device == null) {
+                if (!inventoryLogged) {
+                    UsbDeviceWrapper.logConnectedDevices(usbManager) { log(it) }
+                    inventoryLogged = true
+                }
+
+                if (!experimentalAttempted) {
+                    device =
+                        UsbDeviceWrapper.findFirst(
+                            context,
+                            usbManager,
+                            { log(it) },
+                            allowExperimental = true,
+                        )
+                    experimentalAttempted = true
+
+                    if (device != null) {
+                        logWarn(
+                            "[USB] Using experimental Carlinkit-like adapter candidate. " +
+                                "If the protocol differs from CPC200-CCPA, handshake may fail.",
+                            tag = Logger.Tags.USB,
+                        )
+                        break
+                    }
+                }
+
                 attempts++
                 delay(USB_WAIT_PERIOD_MS)
             }

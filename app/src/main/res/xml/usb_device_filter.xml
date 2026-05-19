@@ -3,6 +3,10 @@
     <!-- Carlinkit CPC200-CCPA Primary -->
     <usb-device vendor-id="4884" product-id="5408" />
     <usb-device vendor-id="4884" product-id="5409" />
+    <!-- Carlinkit vendor fallback for newer CPC200 variants; runtime code still verifies shape before use. -->
+    <usb-device vendor-id="4884" />
     <!-- Alternate device ID -->
     <usb-device vendor-id="2276" product-id="448" />
+    <!-- Magic Communication vendor fallback for Auto Box variants. -->
+    <usb-device vendor-id="2276" />
 </resources>
