@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.Timer
 import java.util.TimerTask
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -126,6 +127,8 @@ class CarlinkManager(
         private const val MAX_RECONNECT_DELAY_MS = 30000L // Cap at 30 seconds
         private const val NO_RESPONSE_AUTO_REBOOT_THRESHOLD = 2
         private const val NO_RESPONSE_REBOOT_SETTLE_MS = 20_000L
+        private const val USB_ENUMERATION_SETTLE_MS = 300L
+        private const val STALE_SESSION_TEARDOWN_DELAY_MS = 300L
 
         // Surface debouncing - wait for size to stabilize before updating codec
         private const val SURFACE_DEBOUNCE_MS = 150L
@@ -279,6 +282,11 @@ class CarlinkManager(
     // Current state
     private val currentState = AtomicReference(State.DISCONNECTED)
     val state: State get() = currentState.get()
+
+    // Prevents overlapping USB open/init attempts from Compose startup, USB attach intents,
+    // reconnect jobs, or user taps. The lifecycle is not fully actor-serialized yet, but
+    // this cheap guard avoids the highest-risk duplicate start race without changing stop().
+    private val startInProgress = AtomicBoolean(false)
 
     // Session-scoped unknown data counters — reset on connect, dumped on disconnect
     private var unknownMessageTypeCount = 0
@@ -795,6 +803,19 @@ class CarlinkManager(
      *   so it is safe to invoke repeatedly (e.g. after a user "reconnect" tap).
      */
     suspend fun start() {
+        if (!startInProgress.compareAndSet(false, true)) {
+            logWarn("[LIFECYCLE] start() ignored because another start is already in progress", tag = Logger.Tags.USB)
+            return
+        }
+
+        try {
+            startInternal()
+        } finally {
+            startInProgress.set(false)
+        }
+    }
+
+    private suspend fun startInternal() {
         // Guard: Ensure H264Renderer is initialized before starting connection
         // This prevents video data from being discarded when app starts via MediaBrowserService
         // before MainActivity/Surface is ready
@@ -865,8 +886,10 @@ class CarlinkManager(
 
         if (!device.openWithPermission()) {
             logError("Failed to open USB device", tag = Logger.Tags.USB)
+            device.close()
+            usbDevice = null
             setState(State.DISCONNECTED)
-            setStatusText("USB permission denied")
+            setStatusText("USB open failed")
             return
         }
 
@@ -878,16 +901,16 @@ class CarlinkManager(
         log("Clearing stale adapter session state")
         device.write(MessageSerializer.serializeDisconnectPhone())
         device.write(MessageSerializer.serializeCloseDongle())
-        // Empirical 200ms floor — shorter values showed "adapter busy" errors on fast
+        // Empirical 300ms floor — shorter values showed "adapter busy" errors on fast
         // reconnect paths. 3-host evidence for firmware 2025.10.15.1127CAY:
         // - POTATO GM AAOS (5 samples): CMD_STOP_PHONE_CONNECTION use-time 277-287ms,
-        //   mean ~283ms. 200ms sleep is BELOW the envelope; raise to 300ms if races recur.
+        //   mean ~283ms.
         // - AAOS emulator v120 (1 sample): 229ms use-time.
         // - macOS Carlink app SKIPS the cmd entirely and lets adapter self-teardown via
         //   "Host No Response" timeout — a viable alternative strategy. Cited:
         //   /Volumes/POTATO/cpc200/20260420/*.log, adapter_tty_215842_20APR26.log:845,
         //   adapter_tty_214729_20APR26.log:4983 (Host-No-Response path).
-        Thread.sleep(200)
+        Thread.sleep(STALE_SESSION_TEARDOWN_DELAY_MS)
 
         // Create video processor for direct USB -> codec data flow
         // This bypasses message parsing for zero-copy performance (DIRECT_HANDOFF)
@@ -1692,6 +1715,7 @@ class CarlinkManager(
         }
 
         if (device != null) {
+            delay(USB_ENUMERATION_SETTLE_MS)
             log("Carlinkit device found!")
         }
 

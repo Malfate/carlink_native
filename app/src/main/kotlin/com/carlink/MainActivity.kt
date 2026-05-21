@@ -60,6 +60,7 @@ import com.carlink.usb.UsbDeviceWrapper
 import com.carlink.util.IconAssets
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
@@ -90,6 +91,10 @@ import java.nio.ByteOrder
  *    [SettingsScreen] on top via AnimatedVisibility rather than replacing it.
  */
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val USB_ATTACH_AUTO_START_DELAY_MS = 750L
+    }
+
     // Nullable to prevent UninitializedPropertyAccessException if Activity
     // is destroyed before initialization completes (e.g., low memory kill)
     private var carlinkManager: CarlinkManager? = null
@@ -325,6 +330,11 @@ class MainActivity : ComponentActivity() {
             if (manager != null && manager.state == CarlinkManager.State.DISCONNECTED) {
                 logInfo("[LIFECYCLE] Manager disconnected — auto-starting connection", tag = "MAIN")
                 CoroutineScope(Dispatchers.IO).launch {
+                    delay(USB_ATTACH_AUTO_START_DELAY_MS)
+                    if (manager.state != CarlinkManager.State.DISCONNECTED) {
+                        logInfo("[LIFECYCLE] USB attach auto-start skipped; manager state=${manager.state}", tag = "MAIN")
+                        return@launch
+                    }
                     manager.start()
                 }
             }
