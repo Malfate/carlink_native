@@ -1,6 +1,8 @@
 package com.carlink.ui
 
+import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbManager
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -88,6 +90,7 @@ import com.carlink.ui.settings.LogsTabContent
 import com.carlink.ui.settings.PhonesTabContent
 import com.carlink.ui.settings.SettingsTab
 import com.carlink.ui.theme.AutomotiveDimens
+import com.carlink.usb.UsbDeviceWrapper
 import kotlinx.coroutines.launch
 
 /** Settings screen with NavigationRail for device control, display settings, and log management. */
@@ -341,6 +344,8 @@ private fun ControlTabContent(
 
     val adapterConfigPreference = remember { AdapterConfigPreference.getInstance(context) }
     var showAdapterConfigDialog by remember { mutableStateOf(false) }
+    val usbManager = remember { context.getSystemService(Context.USB_SERVICE) as UsbManager }
+    var usbDiagnostics by remember { mutableStateOf(scanUsbDevices(usbManager)) }
     // KNOWN STALENESS WINDOW: `remember { … }` with no key captures the value once for the
     // lifetime of this composition. If the user enables/disables Cluster Navigation in the
     // AdapterConfigurationDialog (L529-540) while the Control tab is still composed, this
@@ -376,6 +381,16 @@ private fun ControlTabContent(
                     .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
+            UsbDiagnosticsCard(
+                diagnostics = usbDiagnostics,
+                onRescan = {
+                    usbDiagnostics = scanUsbDevices(usbManager)
+                    UsbDeviceWrapper.logConnectedDevices(usbManager) { message ->
+                        logInfo(message, tag = "USB")
+                    }
+                },
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -620,6 +635,71 @@ private fun ControlTabContent(
                 }
             },
         )
+    }
+}
+
+private fun scanUsbDevices(usbManager: UsbManager): List<String> {
+    val devices =
+        usbManager.deviceList.values
+            .sortedWith(compareBy({ it.vendorId }, { it.productId }, { it.deviceName }))
+
+    if (devices.isEmpty()) {
+        return listOf("Android reports 0 USB devices. The adapter is getting power only, or the port/cable is not passing USB data to apps.")
+    }
+
+    return devices.map { device ->
+        val accepted = UsbDeviceWrapper.isKnownOrExperimentalDevice(device)
+        val verdict =
+            if (accepted) {
+                "candidate"
+            } else {
+                "not accepted"
+            }
+        "$verdict: ${UsbDeviceWrapper.describeDevice(device)}"
+    }
+}
+
+@Composable
+private fun UsbDiagnosticsCard(
+    diagnostics: List<String>,
+    onRescan: () -> Unit,
+) {
+    ControlCard(
+        title = "USB Diagnostics",
+        icon = Icons.Default.Usb,
+    ) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            diagnostics.forEach { line ->
+                Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            FilledTonalButton(
+                onClick = onRescan,
+                modifier = Modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Usb,
+                    contentDescription = "Rescan USB",
+                    modifier = Modifier.size(AutomotiveDimens.IconSize),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Rescan USB",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 

@@ -833,9 +833,16 @@ class CarlinkManager(
         log("Searching for Carlinkit device...")
         val device = findDevice()
         if (device == null) {
+            val usbDeviceCount = usbManager.deviceList.size
             logError("Failed to find Carlinkit device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
-            setStatusText("Adapter not found")
+            setStatusText(
+                if (usbDeviceCount == 0) {
+                    "Adapter not found — no USB data device"
+                } else {
+                    "Adapter not found — unsupported USB device"
+                },
+            )
             return
         }
 
