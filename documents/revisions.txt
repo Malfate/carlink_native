@@ -511,3 +511,10 @@
    - Adds default Play release notes for the playRelease variant.
    - No runtime code changes from 136.
    - Affected: AGENTS.md, build.gradle.kts, app/build.gradle.kts, app/src/playRelease/play/release-notes/en-US/default.txt, documents/revisions.txt.
+
+[139] :: Launcher icon refresh.
+   - Adds a scalable adaptive launcher icon with foreground, background, and monochrome vector layers for the next Play build.
+   - Points the launcher adaptive icon to the new drawable vector assets instead of the legacy density PNG layers.
+   - Updates Play release notes for the icon build.
+   - No runtime behavior changes from 138.
+   - Affected: app/build.gradle.kts, app/src/main/res/drawable/ic_launcher_background.xml, app/src/main/res/drawable/ic_launcher_foreground.xml, app/src/main/res/drawable/ic_launcher_monochrome.xml, app/src/main/res/mipmap-anydpi/ic_launcher.xml, app/src/playRelease/play/release-notes/en-US/default.txt, documents/revisions.txt.

@@ -1,1 +1,1 @@
-Improves USB startup reliability and connection recovery diagnostics for Android Automotive OS testing.
+Adds the new Carlink app icon and keeps the recent USB startup reliability improvements for Android Automotive OS testing.
