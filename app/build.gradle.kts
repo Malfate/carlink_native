@@ -26,7 +26,7 @@ android {
         applicationId = "com.krushin.carplay"
         minSdk = 32
         targetSdk = 36
-        versionCode = 135
+        versionCode = 136
         versionName = "1.0.0"
 
 //###############################################

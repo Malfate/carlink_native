@@ -496,3 +496,11 @@
    - Two reboot tests confirmed fix: card shows placeholder ("Phone rejected configuration") then real track metadata once phone connects.
    - Force-stop+relaunch case still hits documented AOSP rebind gap (PlaybackViewModel.java:306 orphaned-controller TODO) — not addressable app-side.
    - Affected: MediaSessionManager.kt, CarlinkMediaBrowserService.kt, MainActivity.kt.
+
+[136] :: USB startup race hardening and field diagnostics.
+   - CarlinkManager.kt adds a startInProgress guard so Compose startup, USB attach intents, reconnect jobs, and user taps cannot overlap USB open/init.
+   - Adds short USB enumeration and attach auto-start settle delays before claiming the interface after re-enumeration.
+   - Raises stale-session teardown delay to the documented 300ms processing floor and cleans up usbDevice state after open failure.
+   - Repeated no-initial-response failures now trigger one adapter reboot recovery attempt, then stop the tight retry loop if the adapter remains silent.
+   - MainActivity.kt logs full USB attach descriptors for field debugging; AGENTS.md documents Play Store and manufacturer-reference context.
+   - Affected: app/build.gradle.kts, CarlinkManager.kt, MainActivity.kt, AGENTS.md.

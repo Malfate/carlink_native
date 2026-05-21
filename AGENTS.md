@@ -6,6 +6,11 @@ Before doing any work, read and follow `/Users/krushin/.claude/CLAUDE.md` as my 
 
 - My vehicle is a 2025 GMC Sierra EV.
 
+## Android / Play Store Context
+
+- We have access to an Android developer account and can deploy this app to the Google Play Store when explicitly requested.
+- Do not publish, promote, or upload Play Store releases unless the user explicitly asks for that deployment step.
+
 ## Carlinkit Manufacturer Reference Context
 
 - This repo does **not** currently contain the raw manufacturer APKs or a full checked-in decompiled source tree.
