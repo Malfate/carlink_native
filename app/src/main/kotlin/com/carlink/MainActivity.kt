@@ -177,13 +177,7 @@ class MainActivity : ComponentActivity() {
                 intent: Intent,
             ) {
                 if (UsbManager.ACTION_USB_DEVICE_DETACHED == intent.action) {
-                    val device =
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                        }
+                    val device = usbDeviceFromIntent(intent)
 
                     device?.let {
                         // Only handle if it's a known or experimental Carlinkit-like device
@@ -312,6 +306,14 @@ class MainActivity : ComponentActivity() {
         // The "bring back" REORDER_TO_FRONT intent from launchCarAppActivity()
         // also arrives here (singleTop) — must NOT re-trigger the launch cycle.
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            usbDeviceFromIntent(intent)?.let {
+                logInfo(
+                    "[USB_ATTACH] Device attached: ${UsbDeviceWrapper.describeDevice(it)} " +
+                        "accepted=${UsbDeviceWrapper.isKnownOrExperimentalDevice(it)}",
+                    tag = "MAIN",
+                )
+            }
+
             // Only launch cluster binding if cluster navigation is enabled
             if (AdapterConfigPreference.getInstance(this).getClusterNavigationSync()) {
                 logInfo("[LIFECYCLE] onNewIntent: USB_DEVICE_ATTACHED — re-launching cluster binding", tag = "MAIN")
@@ -328,6 +330,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun usbDeviceFromIntent(intent: Intent): UsbDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+        }
 
     override fun onDestroy() {
         super.onDestroy()

@@ -124,6 +124,8 @@ class CarlinkManager(
         private const val MAX_RECONNECT_ATTEMPTS = 5
         private const val INITIAL_RECONNECT_DELAY_MS = 2000L // Start with 2 seconds
         private const val MAX_RECONNECT_DELAY_MS = 30000L // Cap at 30 seconds
+        private const val NO_RESPONSE_AUTO_REBOOT_THRESHOLD = 2
+        private const val NO_RESPONSE_REBOOT_SETTLE_MS = 20_000L
 
         // Surface debouncing - wait for size to stabilize before updating codec
         private const val SURFACE_DEBOUNCE_MS = 150L
@@ -161,7 +163,8 @@ class CarlinkManager(
         // runbook lives only in-source — define them here so the sites that reference them
         // (see handleError body, and the SCANNING_DEVICE branch in handleMessage) stay in sync.
         //
-        //   Pattern A — "no initial response" errors in a row (consecutiveNoResponse >= 2).
+        //   Pattern A — repeated "no initial response" errors in a row
+        //               (consecutiveNoResponse >= NO_RESPONSE_AUTO_REBOOT_THRESHOLD).
         //               The adapter's USB write path appears dead; retrying won't help.
         //               Surfaced as "Adapter not responding — reboot adapter".
         //
@@ -424,6 +427,7 @@ class CarlinkManager(
     private var consecutiveNoResponse: Int = 0
     private var shortLivedStreamingCount: Int = 0
     private var lastStreamingStartMs: Long = 0L
+    private var autoRebootAttemptedForNoResponse: Boolean = false
 
     // Phase 13 (negotiation_failed) — prevents auto-restart loop when iPhone rejects config
     private var negotiationRejected: Boolean = false
@@ -1001,6 +1005,7 @@ class CarlinkManager(
         hadPriorSession = false // Reset escalation — user-initiated fresh start
         consecutiveNoResponse = 0
         shortLivedStreamingCount = 0
+        autoRebootAttemptedForNoResponse = false
         currentPhoneType = null // Clear phone type on disconnect
         currentWifi = null
         videoPhoneTypeInferred = false
@@ -1727,6 +1732,7 @@ class CarlinkManager(
                 reconnectAttempts = 0
                 consecutiveNoResponse = 0
                 shortLivedStreamingCount = 0
+                autoRebootAttemptedForNoResponse = false
                 hadPriorSession = true
 
                 // Store phone type for keyframe request decisions during recovery
@@ -2625,6 +2631,11 @@ class CarlinkManager(
         clearPairTimeout()
 
         logError("Adapter error: $error", tag = Logger.Tags.ADAPTR)
+        val isNoResponse = error.contains("no initial response")
+        val nextConsecutiveNoResponse = if (isNoResponse) consecutiveNoResponse + 1 else 0
+        val shouldAutoRebootForNoResponse =
+            nextConsecutiveNoResponse >= NO_RESPONSE_AUTO_REBOOT_THRESHOLD &&
+                !autoRebootAttemptedForNoResponse
 
         // Full session state reset (mirrors stop() minus cancelReconnect/graceful teardown)
         cancelDelayedKeyframe()
@@ -2646,6 +2657,17 @@ class CarlinkManager(
         stopMicrophoneCapture()
         gnssForwarder?.stop()
 
+        if (shouldAutoRebootForNoResponse) {
+            autoRebootAttemptedForNoResponse = true
+            logWarn(
+                "[RECOVERY] Repeated no-initial-response failures; sending adapter reboot " +
+                    "before closing USB",
+                tag = Logger.Tags.USB,
+            )
+            val rebootSent = adapterDriver?.rebootAdapter() ?: false
+            logWarn("[RECOVERY] Adapter reboot command sent=$rebootSent", tag = Logger.Tags.USB)
+        }
+
         // Stop adapter driver (heartbeat, reading loop) and close USB.
         // Skip graceful teardown — USB is likely dead.
         adapterDriver?.stop()
@@ -2660,9 +2682,8 @@ class CarlinkManager(
 
         // Pattern A: track consecutive "no initial response" errors (adapter USB write dead)
         // Pattern C: track short-lived STREAMING sessions (unstable adapter)
-        val isNoResponse = error.contains("no initial response")
         if (isNoResponse) {
-            consecutiveNoResponse++
+            consecutiveNoResponse = nextConsecutiveNoResponse
         } else {
             consecutiveNoResponse = 0
         }
@@ -2680,18 +2701,25 @@ class CarlinkManager(
         // Schedule auto-reconnect for USB disconnect errors
         if (isUsbDisconnectError(error)) {
             // Escalate status based on observed patterns
-            if (consecutiveNoResponse >= 2) {
+            if (shouldAutoRebootForNoResponse) {
+                setStatusText("Adapter not responding — rebooting adapter...")
+                scheduleReconnect(delayOverrideMs = NO_RESPONSE_REBOOT_SETTLE_MS)
+            } else if (consecutiveNoResponse >= NO_RESPONSE_AUTO_REBOOT_THRESHOLD) {
                 // Pattern A: adapter USB write dead — retrying won't help
                 setStatusText("Adapter not responding — reboot adapter")
                 logWarn("[ESCALATION] Pattern A: $consecutiveNoResponse consecutive no-response errors", tag = Logger.Tags.USB)
+                CarlinkMediaBrowserService.stopConnectionForeground(context)
             } else if (shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT) {
                 // Pattern C: sessions keep dying within seconds
                 setStatusText("Connection unstable — reboot adapter")
                 logWarn("[ESCALATION] Pattern C: $shortLivedStreamingCount short-lived sessions", tag = Logger.Tags.USB)
+                scheduleReconnect()
             } else if (isNoResponse) {
                 setStatusText("Adapter not responding — reconnecting...")
+                scheduleReconnect()
+            } else {
+                scheduleReconnect()
             }
-            scheduleReconnect()
         }
     }
 
@@ -2718,7 +2746,7 @@ class CarlinkManager(
      *
      * Gives up after MAX_RECONNECT_ATTEMPTS to prevent infinite loops.
      */
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(delayOverrideMs: Long? = null) {
         // Cancel any existing reconnect attempt
         reconnectJob?.cancel()
 
@@ -2729,7 +2757,7 @@ class CarlinkManager(
                 tag = Logger.Tags.USB,
             )
             val giveUpMessage = when {
-                consecutiveNoResponse >= 2 -> "Adapter not responding — reboot adapter"
+                consecutiveNoResponse >= NO_RESPONSE_AUTO_REBOOT_THRESHOLD -> "Adapter not responding — reboot adapter"
                 shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT -> "Connection unstable — reboot adapter"
                 hadPriorSession -> "Phone not reconnecting — reboot adapter"
                 else -> "Adapter not responding — unplug and replug adapter"
@@ -2749,9 +2777,11 @@ class CarlinkManager(
         // Maintain foreground priority during reconnect delay to prevent LMK kill
         CarlinkMediaBrowserService.startConnectionForeground(context)
 
-        // Calculate delay with exponential backoff, capped at max
+        // Calculate delay with exponential backoff, capped at max. Recovery paths that
+        // deliberately reset/reboot the adapter can override this to give firmware time
+        // to drop and re-enumerate before we claim the USB interface again.
         val delay =
-            minOf(
+            delayOverrideMs ?: minOf(
                 INITIAL_RECONNECT_DELAY_MS * (1L shl reconnectAttempts),
                 MAX_RECONNECT_DELAY_MS,
             )
