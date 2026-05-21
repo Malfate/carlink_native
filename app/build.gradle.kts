@@ -1,7 +1,9 @@
+import com.github.triplet.gradle.androidpublisher.ReleaseStatus
 import java.util.Properties
 
 plugins {
     id("com.android.application")
+    id("com.github.triplet.play")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jlleitschuh.gradle.ktlint")
     id("io.gitlab.arturbosch.detekt")
@@ -26,7 +28,7 @@ android {
         applicationId = "com.krushin.carplay"
         minSdk = 32
         targetSdk = 36
-        versionCode = 136
+        versionCode = 138
         versionName = "1.0.0"
 
 //###############################################
@@ -156,6 +158,18 @@ detekt {
     config.setFrom(files("$rootDir/detekt.yml"))
     baseline = file("$rootDir/detekt-baseline.xml")
     ignoreFailures = true // report only on first run
+}
+
+play {
+    val credentialsPath = providers
+        .gradleProperty("playServiceAccountCredentials")
+        .orElse(providers.environmentVariable("PLAY_SERVICE_ACCOUNT_JSON"))
+        .orElse("${System.getProperty("user.home")}/.config/carlink/play-service-account.json")
+
+    serviceAccountCredentials.set(file(credentialsPath.get()))
+    track.set("automotive:qa")
+    releaseStatus.set(ReleaseStatus.DRAFT)
+    releaseName.set("${android.defaultConfig.versionName} (${android.defaultConfig.versionCode})")
 }
 
 dependencies {

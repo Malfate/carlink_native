@@ -504,3 +504,10 @@
    - Repeated no-initial-response failures now trigger one adapter reboot recovery attempt, then stop the tight retry loop if the adapter remains silent.
    - MainActivity.kt logs full USB attach descriptors for field debugging; AGENTS.md documents Play Store and manufacturer-reference context.
    - Affected: app/build.gradle.kts, CarlinkManager.kt, MainActivity.kt, AGENTS.md.
+
+[138] :: Play upload retry.
+   - Bumps the Play release version code after previous draft uploads surfaced stale validation rows.
+   - Adds Gradle Play Publisher wiring for future Android Automotive OS internal testing draft uploads via `automotive:qa`.
+   - Adds default Play release notes for the playRelease variant.
+   - No runtime code changes from 136.
+   - Affected: AGENTS.md, build.gradle.kts, app/build.gradle.kts, app/src/playRelease/play/release-notes/en-US/default.txt, documents/revisions.txt.
