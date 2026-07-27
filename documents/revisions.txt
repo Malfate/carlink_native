@@ -780,3 +780,28 @@
    - UNVERIFIED ON HARDWARE: no VCU unit on hand. Reasoned from the code paths and AOSP contracts.
    - NO TEST COVERAGE: repo still has zero test sources.
    - Affected: CarlinkManager.kt, media/CarlinkMediaBrowserService.kt, MainActivity.kt, ui/MainScreen.kt
+
+[149] :: CRITICAL follow-up to [147]: detectGmAaos() never matched the VCU family, nulling those fixes.
+   - Found while re-checking whether [147] would actually engage on a Sierra EV. It would NOT have.
+   - detectGmAaos() matched only: manufacturer=="Harman_Samsung", OR "gminfo" in product, OR device
+     starts with "gminfo". All three are Info 3.7 naming.
+   - The VCU/VCUNH1 family names itself after the VEHICLE LINE, not the radio generation:
+     CT5 build.prop reports device="burmese", product="burmese_orange". A Sierra/Silverado EV matches
+     none of the "gminfo" patterns, so isGmAaos returned FALSE on a GM head unit.
+   - Cascade: requiresGmAaosAudioFixes() is `isGmAaos`, and isVcuCluster()'s tier-2 fallback is
+     `isGmAaos && sdk>=34 && !isGmInfo37()`. Both silently false on an EV.
+   - Net effect: [147]'s audio-profile fix and VCU cluster fallback were BOTH inert on the exact
+     hardware they were written for. Only tier-1 (Build.ID starting "VCU") could still fire, and that
+     is a single unverified literal from one CT5.
+   - Root cause is that the check was name-based when a stable model-independent signal was sitting in
+     this same file's KDoc, unused: 2024 Silverado reports Build.MANUFACTURER="gm".
+   - Fix: manufacturer=="gm" is now the primary check. Kept Harman_Samsung + gminfo patterns for
+     compatibility, and added the burmese / "VCU" build-id literals as redundancy.
+   - detectGmAaos() now takes buildId so the VCU prefix is usable here, not just in isVcuCluster().
+   - gminfo3.7 unaffected: it already matched on product/device and reports manufacturer="gm" too.
+   - Non-GM unaffected: AAOS emulator reports manufacturer="Google", product="sdk_gcar_*".
+   - LESSON: platform gates keyed on product/device NAMES break on every new vehicle line. Key on
+     manufacturer plus an explicit capability/API-level test.
+   - UNVERIFIED ON HARDWARE: still no VCU unit. "[PLATFORM] Detected:" (unconditional since [147]) is
+     the confirmation — check gm=true, then gmAudioFixes / vcu / immersive.
+   - Affected: platform/PlatformDetector.kt

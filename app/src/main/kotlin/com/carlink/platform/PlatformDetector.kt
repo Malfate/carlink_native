@@ -43,11 +43,13 @@ object PlatformDetector {
      * Platform information data class.
      *
      * @property isIntel True if CPU architecture is x86 or x86_64
-     * @property isGmAaos True if device is GM AAOS. Matches on Harman_Samsung manufacturer
-     *   OR "gminfo" in product OR device starts with "gminfo". 2024 Silverado gminfo37
-     *   reports Build.MANUFACTURER="gm" (confirmed 6 detections across 3 POTATO sessions
-     *   2026-04-20: product=full_gminfo37_gb, device=gminfo37). The Harman_Samsung branch
-     *   is DEAD CODE on this hardware — kept defensively for hypothetical OEM variants.
+     * @property isGmAaos True if device is GM AAOS. Primary signal is
+     *   Build.MANUFACTURER="gm"; also matches the legacy Harman_Samsung string, "gminfo" in
+     *   product/device (Info 3.7), and the VCU/VCUNH1 literals (burmese / "VCU" build id).
+     *   2024 Silverado gminfo37 reports manufacturer="gm" (confirmed 6 detections across 3
+     *   POTATO sessions 2026-04-20: product=full_gminfo37_gb, device=gminfo37). See
+     *   [detectGmAaos] for why the manufacturer check matters — name-based matching alone
+     *   excluded every GM EV.
      * @property cpuArch Primary CPU ABI (e.g., "arm64-v8a", "x86_64")
      * @property hasIntelCodec True if an Intel video codec is available. Naive
      *   substring match on ".contains("Intel")" in the decoder name — fragile if the
@@ -236,7 +238,7 @@ object PlatformDetector {
         val hardware = Build.HARDWARE ?: ""
         val buildId = Build.ID ?: ""
 
-        val isGmAaos = detectGmAaos(manufacturer, product, device)
+        val isGmAaos = detectGmAaos(manufacturer, product, device, buildId)
         val (_, hardwareH264DecoderName) = detectHardwareH264Decoder()
         val hasIntelCodec = hardwareH264DecoderName?.contains("Intel", ignoreCase = true) == true
         val nativeSampleRate = detectNativeSampleRate(context)
@@ -320,24 +322,45 @@ object PlatformDetector {
         }
 
     /**
-     * Detect if device is GM AAOS based on manufacturer, product, and device strings.
+     * Detect if device is GM AAOS based on manufacturer, product, device and build id.
      *
      * Observed on 2024 Silverado gminfo37 (root README.md):
-     * - Manufacturer: "gm"                    (Harman_Samsung branch does NOT fire)
+     * - Manufacturer: "gm"
      * - Product: "full_gminfo37_gb"           (matches via contains("gminfo"))
      * - Device: "gminfo37"                    (matches via startsWith("gminfo"))
      *
-     * The Harman_Samsung branch is kept defensively for hypothetical OEM variants that
-     * expose the underlying Harman/Samsung manufacturer at the Build level.
+     * MANUFACTURER IS THE LOAD-BEARING CHECK, not the "gminfo" name matches.
+     *
+     * This function previously keyed only on Harman_Samsung (documented dead code on real
+     * GM hardware) plus the literal string "gminfo" in product/device. That silently
+     * excluded the entire GM VCU/VCUNH1 family, which names itself after the vehicle line
+     * rather than the radio generation — the CT5 build.prop reports device="burmese",
+     * product="burmese_orange". A Sierra EV / Silverado EV matches none of the "gminfo"
+     * patterns, so isGmAaos came back FALSE on a GM head unit.
+     *
+     * That miss cascaded: [PlatformInfo.requiresGmAaosAudioFixes] and the tier-2 fallback in
+     * [PlatformInfo.isVcuCluster] are both gated on isGmAaos, so on an EV they silently
+     * evaluated to false and every GM-specific tuning path was skipped — the app fell back to
+     * the generic "unknown vendor" profile on hardware we can identify perfectly well.
+     *
+     * `Build.MANUFACTURER == "gm"` was documented in this file the whole time and simply
+     * wasn't being used. It is the stable, model-independent signal; the burmese/VCU literals
+     * below are belt-and-braces in case a variant reports something else there.
      */
     private fun detectGmAaos(
         manufacturer: String,
         product: String,
         device: String,
+        buildId: String,
     ): Boolean =
-        manufacturer.equals("Harman_Samsung", ignoreCase = true) ||
+        manufacturer.equals("gm", ignoreCase = true) ||
+            manufacturer.equals("Harman_Samsung", ignoreCase = true) ||
             product.contains("gminfo", ignoreCase = true) ||
-            device.startsWith("gminfo", ignoreCase = true)
+            device.startsWith("gminfo", ignoreCase = true) ||
+            // GM VCU / VCUNH1 family literals (CT5 build.prop; see PlatformInfo.isVcuCluster).
+            device.equals("burmese", ignoreCase = true) ||
+            product.contains("burmese", ignoreCase = true) ||
+            buildId.startsWith("VCU", ignoreCase = true)
 
     /**
      * Detect the best available hardware H.264 decoder.
