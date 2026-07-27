@@ -86,9 +86,12 @@ data class AudioConfig(
             val effectiveSampleRate = userSampleRate ?: platformInfo.nativeSampleRate
 
             return when {
-                // Intel + GM AAOS: the profiled target (gminfo37). sampleRate is
-                // overridable via userSampleRate for field testing — intentional,
-                // even though non-48kHz defeats the "avoid resampling" rationale.
+                // ANY GM AAOS head unit — Intel gminfo3.7 (the profiled target) and the ARM
+                // VCU/VCUNH1 radios alike. The FAST-track denial this profile compensates for
+                // is GM's third-party-app policy, not an Intel quirk, so ARM GM units belong
+                // here too rather than in the unverified `else` fallback below. sampleRate is
+                // overridable via userSampleRate for field testing — intentional, even though
+                // non-48kHz defeats the "avoid resampling" rationale.
                 platformInfo.requiresGmAaosAudioFixes() -> {
                     GM_AAOS.copy(sampleRate = effectiveSampleRate)
                 }

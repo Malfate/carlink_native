@@ -2,17 +2,20 @@
 
 package com.carlink.media
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaLibraryService.MediaLibrarySession
@@ -232,29 +235,97 @@ class CarlinkMediaBrowserService : MediaLibraryService() {
     // Foreground mode (manual — covers CONNECTING, pre-playback)
     // ──────────────────────────────────────────────────────────────────────
 
+    /**
+     * Compute the runtime foreground-service type mask.
+     *
+     * Type mask is a CONTRACT with AndroidManifest.xml's foregroundServiceType — narrowing
+     * the manifest to just one type (e.g., dropping connectedDevice) while leaving this OR
+     * intact throws SecurityException at runtime.
+     *   MEDIA_PLAYBACK     — requires FOREGROUND_SERVICE_MEDIA_PLAYBACK perm
+     *   CONNECTED_DEVICE   — requires FOREGROUND_SERVICE_CONNECTED_DEVICE perm
+     *                        plus one of BLUETOOTH/NFC/USB/NETWORK_STATE/...
+     *                        (CHANGE_NETWORK_STATE + usb.host feature satisfy)
+     *   MICROPHONE         — requires FOREGROUND_SERVICE_MICROPHONE perm AND a granted
+     *                        RECORD_AUDIO runtime permission.
+     *
+     * MICROPHONE is CONDITIONAL. On Android 14+ (API 34) an app may only capture audio while
+     * it has a visible foreground activity OR an FGS declaring the microphone type. Without
+     * it the framework silently substitutes SILENCE for AudioRecord reads as soon as
+     * MainActivity stops being visible — Siri and CarPlay calls then capture nothing, with no
+     * exception thrown anywhere. [com.carlink.audio.MicrophoneCaptureManager] is owned by
+     * CarlinkManager (app-scoped), so activity visibility is not a sufficient guarantee.
+     *
+     * The RECORD_AUDIO check is NOT optional: including MICROPHONE in the mask without the
+     * runtime grant throws SecurityException from startForeground and would take down the
+     * whole connection FGS. Users who deny the mic permission keep a working (mic-less)
+     * session instead of a crash; [refreshForegroundServiceType] re-asserts the type if the
+     * grant arrives later.
+     */
+    private fun foregroundServiceTypeMask(): Int {
+        var mask = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        val micGranted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (micGranted) {
+            mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            Log.w(
+                TAG,
+                "[BROWSER_SERVICE] RECORD_AUDIO not granted — microphone FGS type omitted. " +
+                    "Siri/phone-call capture will be silenced whenever the projection surface " +
+                    "is not visible.",
+            )
+        }
+        return mask
+    }
+
     private fun startForegroundMode() {
         synchronized(foregroundLock) {
             if (isForeground) return
             try {
                 val notification = buildNotification()
-                // Type mask is a CONTRACT with AndroidManifest.xml's foregroundServiceType —
-                // narrowing the manifest to just one type (e.g., dropping connectedDevice)
-                // while leaving this OR intact throws SecurityException at runtime.
-                //   MEDIA_PLAYBACK     — requires FOREGROUND_SERVICE_MEDIA_PLAYBACK perm
-                //   CONNECTED_DEVICE   — requires FOREGROUND_SERVICE_CONNECTED_DEVICE perm
-                //                        plus one of BLUETOOTH/NFC/USB/NETWORK_STATE/...
-                //                        (CHANGE_NETWORK_STATE + usb.host feature satisfy)
                 ServiceCompat.startForeground(
                     this,
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                    foregroundServiceTypeMask(),
                 )
                 isForeground = true
                 if (BuildConfig.DEBUG) Log.d(TAG, "[BROWSER_SERVICE] Entered foreground mode")
             } catch (e: Exception) {
                 Log.e(TAG, "[BROWSER_SERVICE] Failed to start foreground: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Re-assert the foreground-service type mask on an already-foreground service.
+     *
+     * Needed because the connection FGS is started during the CONNECTING phase, which can
+     * precede the RECORD_AUDIO grant (first launch, or a user who enables mic later). At that
+     * point [foregroundServiceTypeMask] omits MICROPHONE, and without this re-assert the
+     * service would keep the mic-less mask for the rest of its life — silently silencing Siri.
+     *
+     * Deliberately bypasses the `isForeground` early-return in [startForegroundMode]: repeated
+     * `startForeground` calls with the same notification id update the type set in place and do
+     * not post a second notification. No-ops when the service is not foreground; the next
+     * [startForegroundMode] will compute the current mask anyway.
+     */
+    private fun refreshForegroundServiceType() {
+        synchronized(foregroundLock) {
+            if (!isForeground) return
+            try {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    buildNotification(),
+                    foregroundServiceTypeMask(),
+                )
+                if (BuildConfig.DEBUG) Log.d(TAG, "[BROWSER_SERVICE] Foreground type mask refreshed")
+            } catch (e: Exception) {
+                Log.e(TAG, "[BROWSER_SERVICE] Failed to refresh foreground type: ${e.message}")
             }
         }
     }
@@ -360,6 +431,18 @@ class CarlinkMediaBrowserService : MediaLibraryService() {
         @Suppress("UNUSED_PARAMETER")
         fun stopConnectionForeground(context: Context) {
             instance?.stopForegroundMode()
+        }
+
+        /**
+         * Re-assert the FGS type mask so the `microphone` type is picked up once RECORD_AUDIO
+         * has been granted. Called from CarlinkManager immediately before microphone capture
+         * starts, because the connection FGS is normally already running by then (started in
+         * the CONNECTING phase, potentially before the permission grant).
+         *
+         * No-op when the service is not running or not foreground.
+         */
+        fun refreshMicrophoneForegroundType() {
+            instance?.refreshForegroundServiceType()
         }
     }
 }

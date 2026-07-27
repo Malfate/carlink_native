@@ -9,6 +9,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Android 14 (API 34+) while-in-use mic gate. Without the `microphone` FGS type the
+         framework silently feeds SILENCE to AudioRecord the moment MainActivity stops being
+         visible (GM home button, backup-camera event, native phone UI takeover) — Siri and
+         CarPlay phone calls then capture nothing until the projection surface is refocused.
+         AudioRecord itself does not throw, so this fails invisibly. MicrophoneCaptureManager
+         is owned by CarlinkManager (app-scoped, not activity-scoped), so activity visibility
+         is NOT a sufficient guarantee. See CarlinkMediaBrowserService.foregroundServiceTypeMask. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <!-- Required by connectedDevice foreground service type on Android 14+ -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -143,7 +151,7 @@
         <service
             android:name=".media.CarlinkMediaBrowserService"
             android:exported="true"
-            android:foregroundServiceType="mediaPlayback|connectedDevice"
+            android:foregroundServiceType="mediaPlayback|connectedDevice|microphone"
             tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaLibraryService" />

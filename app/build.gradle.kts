@@ -1,8 +1,19 @@
+import com.github.triplet.gradle.androidpublisher.ReleaseStatus
+import java.util.Properties
+
 plugins {
     id("com.android.application")
+    id("com.github.triplet.play")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jlleitschuh.gradle.ktlint")
     id("io.gitlab.arturbosch.detekt")
+}
+
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -12,7 +23,7 @@ android {
     // Owner identity for the cluster icon ContentProvider hook (issue #6).
     // A FORK changes ONLY ownerApplicationId below — applicationId and the play-flavor
     // cluster icon authority both follow it automatically.
-    val ownerApplicationId = "zeno.carlink"
+    val ownerApplicationId = "com.krushin.carplay"
     val gmClusterIconAuthority =
         "com.google.android.apps.automotive.templates.host.ClusterIconContentProvider"
 
@@ -24,7 +35,7 @@ android {
         applicationId = ownerApplicationId
         minSdk = 29
         targetSdk = 36
-        versionCode = 145
+        versionCode = 147
         versionName = "1.0.0"
 
 //###############################################
@@ -38,9 +49,23 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -165,6 +190,33 @@ detekt {
     ignoreFailures = true // report only on first run
 }
 
+// Play Console upload profile (personal). Only the `publish*` tasks consume this —
+// `bundlePlayRelease` builds and signs the AAB without touching any of it, which is the
+// documented hand-off path in documents/local_play_release_workflow.md.
+//
+// Credentials resolve in order: -PplayServiceAccountCredentials, $PLAY_SERVICE_ACCOUNT_JSON,
+// then ~/.config/carlink/play-service-account.json. The existence check matters: the service
+// account JSON is intentionally NOT in the repo, so on a machine without it an unconditional
+// set() would fail configuration for every task including plain assemble/bundle.
+play {
+    val credentialsPath = providers
+        .gradleProperty("playServiceAccountCredentials")
+        .orElse(providers.environmentVariable("PLAY_SERVICE_ACCOUNT_JSON"))
+        .orElse("${System.getProperty("user.home")}/.config/carlink/play-service-account.json")
+        .get()
+
+    val credentialsFile = file(credentialsPath)
+    if (credentialsFile.exists()) {
+        serviceAccountCredentials.set(credentialsFile)
+    } else {
+        logger.info("Play credentials not found at $credentialsPath — publish tasks disabled, builds unaffected.")
+    }
+
+    track.set("automotive:qa")
+    releaseStatus.set(ReleaseStatus.DRAFT)
+    releaseName.set("${android.defaultConfig.versionName} (${android.defaultConfig.versionCode})")
+}
+
 dependencies {
     // Kotlin
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
@@ -218,4 +270,3 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
-

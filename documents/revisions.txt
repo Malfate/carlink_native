@@ -706,3 +706,42 @@
    - Live wired CarPlay: Urun:0 across windows, Resets:0, zero frame drops, no regressions.
    - Wireless churned every ~11s (adapter USB-IN went silent); wired stable — Wi-Fi link, not these changes.
    - Affected: video/H264Renderer.java, audio/DualStreamAudioManager.kt
+
+[147] :: GM VCU / AAOS 14 platform fixes: microphone FGS type, ARM GM audio profile, VCU detection.
+   - Target: GM VCU/VCUNH1 (Bosch, ARM msmnile, AAOS 14) — Sierra EV / Silverado EV. NOT gminfo3.7.
+   - UNVERIFIED ON HARDWARE: no VCU unit on hand. Reasoned from build.prop notes + AOSP behavior contracts.
+   - versionCode 146 skipped: consumed by an uncommitted local dev build; 147 is the first committed dev build.
+   - MIC (the Android 14 one): manifest FGS type was mediaPlayback|connectedDevice only, no `microphone`.
+   - API 34+ permits audio capture only with a visible activity OR a microphone-typed FGS.
+   - MicrophoneCaptureManager is owned by CarlinkManager (app-scoped), so activity visibility is not guaranteed.
+   - Result on 14: framework substitutes SILENCE into AudioRecord whenever the projection surface is not visible.
+   - Fails invisibly — AudioRecord does not throw. Symptom is Siri/calls hearing nothing, "fixed" by refocusing the app.
+   - Added FOREGROUND_SERVICE_MICROPHONE + `microphone` to foregroundServiceType.
+   - Runtime mask now computed in foregroundServiceTypeMask(); MICROPHONE included only when RECORD_AUDIO is granted.
+   - Unconditional inclusion would throw SecurityException from startForeground and kill the whole connection FGS.
+   - Added refreshForegroundServiceType() + companion refreshMicrophoneForegroundType(), called from
+     CarlinkManager.startMicrophoneCapture — the FGS starts during CONNECTING, which can precede the mic grant.
+   - AUDIO: requiresGmAaosAudioFixes() was `isIntel && isGmAaos`; now `isGmAaos` alone.
+   - FAST-track denial is GM's third-party-app AudioFlinger policy, not an Intel quirk — ARM GM units hit it too.
+   - Old gate silently routed every ARM GM vehicle to AudioConfig's `else` branch: LOW_LATENCY (denied anyway,
+     documented as a jitter risk) + 1000/400ms rings instead of the profiled NONE + 750/300ms.
+   - That branch is annotated STILL UNVERIFIED; it was never meant to catch a known GM device.
+   - requiresIntelMediaCodecFixes() untouched — that one is a genuine architecture concern.
+   - CLUSTER: isVcuCluster() literals (burmese / VCU Build.ID) all came from ONE 2026 CT5 build.prop.
+   - A Sierra EV can miss all three and be misdetected as icon-capable.
+   - Cost of under-detecting is not just wasted CPU: per [117], compose bursts block video reads ~2s over
+     28 maneuvers -> zero-frame gap -> STAGE[drop] -> visible H.264 corruption on every route load.
+   - Added tier-2 family fallback isGmAaosPost13NonInfo37(): isGmAaos && sdk >= 34 && !isGmInfo37().
+   - Safe both ways: gminfo3.7 shipped AAOS 12 so it never reaches API 34 by this route; the only effect
+     is SKIPPING work the VCU cluster discards.
+   - UI: requiresImmersiveDefaults() extended to isGmInfo37() || isVcuCluster().
+   - VCU previously defaulted to SYSTEM_UI_VISIBLE — system bars, windowed projection, OEM Exit tile drawn
+     over GM back-nav. Also the more fragile mode: [144]'s inset double-count only occurs there.
+   - Only changes the DEFAULT; a persisted user Display Mode choice still wins.
+   - PlatformInfo gained sdkInt; toString() now reports sdk / gmAudioFixes / immersive.
+   - "[PLATFORM] Detected:" is now logged UNCONDITIONALLY (was BuildConfig.DEBUG) — on a release build it is
+     the only way to confirm which branch a given head unit took.
+   - NO TEST COVERAGE: repo has zero test sources (testSideloadDebugUnitTest is NO-SOURCE). Verified by
+     build + merged-manifest inspection only.
+   - Affected: AndroidManifest.xml, platform/PlatformDetector.kt, platform/AudioConfig.kt,
+     media/CarlinkMediaBrowserService.kt, CarlinkManager.kt

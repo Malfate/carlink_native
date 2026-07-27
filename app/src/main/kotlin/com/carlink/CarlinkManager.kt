@@ -2454,6 +2454,14 @@ class CarlinkManager(
             stopMicrophoneCapture()
         }
 
+        // Android 14+ (API 34) while-in-use mic gate: the connection FGS is started during
+        // CONNECTING, which can precede the RECORD_AUDIO grant, so its type mask may not yet
+        // carry `microphone`. Re-assert it here — without the microphone FGS type the framework
+        // silently feeds SILENCE to AudioRecord whenever MainActivity is not visible (GM home
+        // button, backup camera, native phone UI), and nothing throws. Cheap no-op when the
+        // mask is already correct or the service is not foreground.
+        CarlinkMediaBrowserService.refreshMicrophoneForegroundType()
+
         val started = microphoneManager?.start(decodeType) ?: false
         if (started) {
             isMicrophoneCapturing = true

@@ -80,15 +80,17 @@ object PlatformDetector {
         val product: String,
         val device: String,
         val buildId: String = "",
+        val sdkInt: Int = Build.VERSION.SDK_INT,
         val isBroxton: Boolean = false,
         val displayWidth: Int = 0,
         val displayHeight: Int = 0,
     ) {
         /**
          * Returns true if device is the GM gminfo37 (2400x960 display).
-         * CURRENTLY UNUSED — reserved for gminfo37-specific tuning that may or may not
-         * materialize. Consider deleting if [isGmAaos] + [isBroxton] ever prove
-         * sufficient for all cases in the audio/video config paths.
+         *
+         * Load-bearing in two places: it selects the immersive UI defaults via
+         * [requiresImmersiveDefaults], and it is the exclusion term that keeps Info 3.7 out of
+         * the VCU family fallback in [isVcuCluster]. Do not delete.
          */
         fun isGmInfo37(): Boolean = device.equals("gminfo37", ignoreCase = true)
 
@@ -102,12 +104,23 @@ object PlatformDetector {
 
         /**
          * Composite: device should receive "gminfo37-like" UI defaults
-         * (fullscreen-immersive, OEM icon hidden, etc.). True on gminfo37 itself.
-         * False elsewhere — including the AAOS emulator (a DEBUG APK on the emulator
-         * no longer defaults to immersive) — preserves existing factory defaults for
-         * non-GM 3P targets.
+         * (fullscreen-immersive, OEM icon hidden, etc.). True on gminfo37 itself and on the
+         * VCU/VCUNH1 radios ([isVcuCluster]).
+         *
+         * VCU was added because the previous `isGmInfo37()`-only test left every GM EV
+         * defaulting to SYSTEM_UI_VISIBLE: system bars eating vertical space, projection
+         * rendered in a window rather than edge-to-edge, and CarPlay's OEM "Exit" tile drawn
+         * on top of GM's own back-nav. That is both the less native-feeling default and the
+         * more fragile one — revision [144] fixed an inset double-count that can only occur in
+         * SYSTEM_UI_VISIBLE, and recorded that immersive is "structurally immune (no
+         * windowInsetsPadding)".
+         *
+         * Still false elsewhere — including the AAOS emulator (a DEBUG APK on the emulator no
+         * longer defaults to immersive) — preserving existing factory defaults for non-GM 3P
+         * targets. This only sets the DEFAULT; the user's Display Mode choice, once persisted,
+         * always wins (see DisplayModePreference).
          */
-        fun requiresImmersiveDefaults(): Boolean = isGmInfo37()
+        fun requiresImmersiveDefaults(): Boolean = isGmInfo37() || isVcuCluster()
 
         /**
          * Returns true on the GM VCU / VCUNH1 (Bosch, AAOS 14) platform — e.g. the 2026 CT5.
@@ -120,19 +133,53 @@ object PlatformDetector {
          * IconBitmapRenderer) and the AA-bitmap cluster-icon shim are pure wasted work — callers
          * use this to skip them while keeping the enum/angle lever (the only thing that matters here).
          *
-         * Detection signature (BEST-EFFORT / UNTESTED — no VCUNH1 hardware on hand) derived from the
+         * Detection is two-tier.
+         *
+         * TIER 1 — exact signatures (BEST-EFFORT — no VCUNH1 hardware on hand) derived from the
          * CT5 `Radio-IVE-86384258-AAOS14-UQBM` build.prop:
          *   ro.product.{system,vendor}.device = "burmese"
          *   ro.product.{system,vendor}.name   = "burmese_orange"
          *   ro.build.id / ro.vendor.build.id  = "VCUUM-371.5"   (the "VCU" family prefix)
          *   ro.product.board / ro.board.platform = "msmnile"     (shared SoC — NOT keyed on)
+         *
+         * TIER 2 — [isGmAaosPost13NonInfo37], the family fallback. Tier 1 came from a single
+         * vehicle, so it recognizes one firmware line rather than the platform; a Sierra EV /
+         * Silverado EV can legitimately miss all three literals. See that function for why
+         * under-detection is the expensive direction.
+         *
          * gminfo37 (Silverado) reports device="gminfo37" / product="full_gminfo37_gb" and Build.ID
-         * without the VCU prefix, so it does NOT match here — gminfo3.7 behavior is unaffected.
+         * without the VCU prefix, and is excluded explicitly from tier 2 — gminfo3.7 behavior is
+         * unaffected by either tier.
          */
         fun isVcuCluster(): Boolean =
             device.equals("burmese", ignoreCase = true) ||
                 product.contains("burmese", ignoreCase = true) ||
-                buildId.startsWith("VCU", ignoreCase = true)
+                buildId.startsWith("VCU", ignoreCase = true) ||
+                isGmAaosPost13NonInfo37()
+
+        /**
+         * Family fallback for the VCU signature above: a GM AAOS head unit on API 34+
+         * (Android 14) that is NOT gminfo3.7.
+         *
+         * The three literal signatures in [isVcuCluster] were all derived from ONE vehicle's
+         * build.prop (a 2026 CT5), so they identify that firmware line rather than the platform.
+         * A Sierra EV / Silverado EV reports different device and product strings and may well
+         * not carry the "VCU" Build.ID prefix, which would leave it misdetected as an
+         * icon-capable cluster.
+         *
+         * Getting this wrong is not free. With the gate false, ComposedIconStore keeps composing
+         * per-maneuver bitmaps that GM's VMSPlugin discards, and revision [117] measured those
+         * compose bursts blocking video reads for ~2s across 28 maneuvers — a zero-frame gap,
+         * then STAGE[drop] and visible H.264 corruption. So the failure mode of under-detecting
+         * is a stuttering, pixelating projection stream on every route load.
+         *
+         * The bound is safe in both directions: gminfo3.7 is excluded explicitly, and GM shipped
+         * AAOS 12 there, so no Info 3.7 vehicle reaches API 34 by this route. Any other GM AAOS 14
+         * radio is VCU-family per the platform notes in README.md, and the only behavior this
+         * enables is *skipping* work whose output that cluster ignores.
+         */
+        private fun isGmAaosPost13NonInfo37(): Boolean =
+            isGmAaos && sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && !isGmInfo37()
 
         /**
          * Returns true if Intel-specific MediaCodec fixes should be applied.
@@ -143,16 +190,33 @@ object PlatformDetector {
 
         /**
          * Returns true if GM AAOS audio optimizations should be applied.
-         * Requires BOTH Intel architecture AND GM AAOS device.
-         * ARM-based GM AAOS devices will return false.
+         *
+         * Keyed on [isGmAaos] ALONE — deliberately NOT `isIntel && isGmAaos`.
+         *
+         * The condition these settings compensate for is GM's AudioFlinger denying
+         * AUDIO_OUTPUT_FLAG_FAST to third-party apps (`createTrack_l(8): ... denied by server`
+         * while system apps pass). That is an app-privilege policy, not a CPU-architecture
+         * quirk, so it applies equally to the ARM GM head units — the VCU/VCUNH1 (Bosch,
+         * `ro.board.platform=msmnile`) radios in the EVs and newer ICE vehicles.
+         *
+         * The previous `isIntel &&` conjunct silently routed every ARM GM vehicle into
+         * AudioConfig's generic `else` fallback, which requests PERFORMANCE_MODE_LOW_LATENCY
+         * (pointless once FAST is denied, and per the AudioConfig header a potential source of
+         * added jitter) and sizes the rings at 1000/400ms instead of the profiled 750/300ms.
+         * That fallback is annotated STILL UNVERIFIED in AudioConfig — it was never meant to be
+         * the path a known GM device takes.
+         *
+         * Intel-specific MediaCodec handling is unaffected; that stays on
+         * [requiresIntelMediaCodecFixes], which is a genuine architecture concern.
          */
-        fun requiresGmAaosAudioFixes(): Boolean = isIntel && isGmAaos
+        fun requiresGmAaosAudioFixes(): Boolean = isGmAaos
 
         override fun toString(): String =
             "PlatformInfo(arch=$cpuArch, intel=$isIntel, gm=$isGmAaos, " +
                 "hwDecoder=${hardwareH264DecoderName ?: "software"}, " +
                 "nativeRate=${nativeSampleRate}Hz, mfr=$manufacturer, product=$product, device=$device, " +
-                "buildId=$buildId, vcu=${isVcuCluster()})"
+                "buildId=$buildId, sdk=$sdkInt, vcu=${isVcuCluster()}, " +
+                "gmAudioFixes=${requiresGmAaosAudioFixes()}, immersive=${requiresImmersiveDefaults()})"
     }
 
     /**
@@ -199,13 +263,19 @@ object PlatformDetector {
                 product = product,
                 device = device,
                 buildId = buildId,
+                sdkInt = Build.VERSION.SDK_INT,
                 isBroxton = isBroxton,
                 displayWidth = displayWidth,
                 displayHeight = displayHeight,
             )
 
+        // Logged unconditionally (not DEBUG-gated like the detail lines below): this single
+        // line is the only way to confirm on a RELEASE build which platform branch a given
+        // head unit actually took — gmAudioFixes / immersive / vcu are all decided from it.
+        // Diagnosing a misdetected vehicle without this means guessing.
+        Log.i(TAG, "[PLATFORM] Detected: $info")
+
         if (BuildConfig.DEBUG) {
-            Log.i(TAG, "[PLATFORM] Detected: $info")
             Log.i(TAG, "[PLATFORM] Hardware H.264 decoder: ${hardwareH264DecoderName ?: "none (software fallback)"}")
             Log.i(TAG, "[PLATFORM] Intel-specific fixes: ${info.requiresIntelMediaCodecFixes()}")
             Log.i(TAG, "[PLATFORM] GM AAOS audio fixes: ${info.requiresGmAaosAudioFixes()}")
