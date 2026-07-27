@@ -415,12 +415,36 @@ class CarlinkMediaBrowserService : MediaLibraryService() {
         /**
          * Start foreground mode for the CONNECTING / STREAMING phases. Idempotent —
          * see class-level KDoc for interaction with Media3's auto-FGS.
+         *
+         * NEVER THROWS. Since Android 12 (API 31) `startForegroundService` raises
+         * [android.app.ForegroundServiceStartNotAllowedException] when the caller has no
+         * foreground activity and no background-start exemption. That is reachable here:
+         * `CarlinkManager.scheduleReconnect` calls this to hold process priority across the
+         * backoff delay, and a reconnect can easily land while the user is on the GM native
+         * screen, the radio, or a backup-camera takeover — precisely when the app is NOT
+         * foreground.
+         *
+         * Letting it propagate would abort the retry at the exact moment the retry is what
+         * keeps the session alive, which reads to the user as "sometimes it just doesn't
+         * come back". Swallowing it degrades gracefully instead: the reconnect still runs,
+         * it simply runs at normal process priority and is therefore LMK-killable. Logged at
+         * WARN so the degraded window is visible in a bug report.
          */
         fun startConnectionForeground(context: Context) {
             val intent = Intent(context, CarlinkMediaBrowserService::class.java).apply {
                 action = ACTION_START_FOREGROUND
             }
-            context.startForegroundService(intent)
+            try {
+                context.startForegroundService(intent)
+            } catch (e: Exception) {
+                // Deliberately broad: the concrete type is API-31+ only, and any failure here
+                // must be non-fatal to the connection path regardless of cause.
+                Log.w(
+                    TAG,
+                    "[BROWSER_SERVICE] Foreground start refused (${e.javaClass.simpleName}: ${e.message}). " +
+                        "Connection continues at normal priority and may be reclaimed under memory pressure.",
+                )
+            }
         }
 
         /**

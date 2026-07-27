@@ -162,7 +162,9 @@ fun MainScreen(
             )
             if (!hasStartedConnection) {
                 hasStartedConnection = true
-                carlinkManager.start()
+                // userInitiated: the surface just became ready after app launch, which starts a
+                // fresh connection episode — prior escalation counters must not carry over.
+                carlinkManager.start(userInitiated = true)
             }
         }
     }

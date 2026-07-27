@@ -330,7 +330,9 @@ class MainActivity : ComponentActivity() {
             if (manager != null && manager.state == CarlinkManager.State.DISCONNECTED) {
                 logInfo("[LIFECYCLE] Manager disconnected — auto-starting connection", tag = "MAIN")
                 CoroutineScope(Dispatchers.IO).launch {
-                    manager.start()
+                    // userInitiated: a physical re-attach is a deliberate user action and starts
+                    // a fresh episode, so stale escalation state must not survive into it.
+                    manager.start(userInitiated = true)
                 }
             }
         }

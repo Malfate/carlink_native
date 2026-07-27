@@ -53,6 +53,7 @@ import com.carlink.usb.UsbDeviceWrapper
 import com.carlink.util.AppExecutors
 import com.carlink.util.LogCallback
 import com.carlink.video.H264Renderer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -835,7 +836,26 @@ class CarlinkManager(
      * - If an AdapterDriver already exists, calls [stop] internally before starting fresh,
      *   so it is safe to invoke repeatedly (e.g. after a user "reconnect" tap).
      */
-    suspend fun start() {
+    /**
+     * @param userInitiated true when this call comes from a deliberate user action — the
+     *   Connect button, or a physical adapter attach — as opposed to the automatic retry
+     *   loop in [scheduleReconnect].
+     *
+     *   This clears the escalation counters. Without it, a user who taps Connect after the
+     *   retry loop gave up is immediately shown "reboot adapter" on their very first failure,
+     *   because [stop] (the only other reset path) is skipped when `adapterDriver` is already
+     *   null — which is exactly the state give-up leaves behind. The counters exist to detect
+     *   a persistently sick adapter across one connection episode; a fresh user attempt starts
+     *   a new episode.
+     */
+    suspend fun start(userInitiated: Boolean = false) {
+        if (userInitiated) {
+            // Fresh episode: forget prior escalation so diagnostics reflect THIS attempt.
+            reconnectAttempts = 0
+            consecutiveNoResponse = 0
+            shortLivedStreamingCount = 0
+        }
+
         // Guard: Ensure H264Renderer is initialized before starting connection
         // This prevents video data from being discarded when app starts via MediaBrowserService
         // before MainActivity/Surface is ready
@@ -880,7 +900,18 @@ class CarlinkManager(
         if (device == null) {
             logError("Failed to find Carlinkit device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
-            setStatusText("Adapter not found")
+            // Retry rather than dead-end. Enumeration is racy on GM head units: the manifest
+            // USB_DEVICE_ATTACHED filter can foreground MainActivity (which auto-starts us)
+            // before the device node is actually claimable, and the adapter re-enumerates from
+            // scratch after every "Apply & Restart" in adapter config. Returning here left the
+            // app parked on "Adapter not found" until the user noticed and tapped Connect,
+            // which is a large share of the connection feeling unreliable. The backoff and
+            // MAX_RECONNECT_ATTEMPTS ceiling still bound this, so a genuinely absent adapter
+            // settles into a clear terminal message instead of spinning.
+            scheduleReconnect(
+                retryLabel = "Searching for adapter",
+                giveUpMessageOverride = "Adapter not found — check that it is plugged in",
+            )
             return
         }
 
@@ -914,9 +945,25 @@ class CarlinkManager(
         )
 
         if (!device.openWithPermission()) {
-            logError("Failed to open USB device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
-            setStatusText("USB permission denied")
+            // openWithPermission() collapses two very different failures into one false:
+            // the user (or a timed-out dialog) refused permission, versus permission being
+            // held but openDevice()/claimInterface() failing — which is transient and common
+            // while the adapter is still settling after enumeration. Re-checking the grant
+            // separates them. Reporting both as "USB permission denied" sent people chasing a
+            // permission problem that was not there.
+            if (!device.hasPermission()) {
+                logError("USB permission not granted for adapter", tag = Logger.Tags.USB)
+                // Terminal on purpose: auto-retrying re-shows the system permission dialog on
+                // every attempt, which is worse than stopping and letting the user decide.
+                setStatusText("USB permission denied — tap Connect to retry")
+            } else {
+                logError("Failed to open USB device (permission held)", tag = Logger.Tags.USB)
+                scheduleReconnect(
+                    retryLabel = "Opening adapter",
+                    giveUpMessageOverride = "Adapter found but will not open — unplug and replug adapter",
+                )
+            }
             return
         }
 
@@ -1188,7 +1235,10 @@ class CarlinkManager(
         setStatusText("Restarting...")
         withContext(Dispatchers.IO) { stop() }
         delay(2000)
-        withContext(Dispatchers.IO) { start() }
+        // userInitiated: reached only from the "Reset Device" button, which is the user's
+        // explicit "start over" — carrying escalation counters across it would make the very
+        // action taken to clear a bad state report that bad state straight back.
+        withContext(Dispatchers.IO) { start(userInitiated = true) }
     }
 
     /**
@@ -2864,8 +2914,27 @@ class CarlinkManager(
 
         setState(State.DISCONNECTED)
 
-        // Schedule auto-reconnect for USB disconnect errors
-        if (isUsbDisconnectError(error)) {
+        // Schedule auto-reconnect for USB disconnect errors.
+        //
+        // [isUsbDisconnectError] classifies by substring, so an error phrased without any of
+        // its keywords used to fall through here and schedule NOTHING — the app went quiet and
+        // stayed disconnected with no retry and no log line saying why. That silent branch is a
+        // direct contributor to connection reliability feeling arbitrary: identical underlying
+        // faults either recovered or did not, purely on error wording.
+        //
+        // `hadPriorSession` is the safety net. If a phone has successfully PLUGGED at least once
+        // this episode, the hardware path is known good, so an unclassified failure is far more
+        // likely transient than terminal — retry is the better default. Backoff and the attempt
+        // ceiling bound the cost either way.
+        val shouldReconnect = isUsbDisconnectError(error) || hadPriorSession
+        if (!shouldReconnect) {
+            logWarn(
+                "[RECONNECT] Not scheduling: error unclassified and no prior session " +
+                    "this episode. error=\"$error\"",
+                tag = Logger.Tags.USB,
+            )
+        }
+        if (shouldReconnect) {
             // Escalate status based on observed patterns
             if (consecutiveNoResponse >= 2) {
                 // Pattern A: adapter USB write dead — retrying won't help
@@ -2884,6 +2953,12 @@ class CarlinkManager(
 
     /**
      * Checks if an error indicates USB disconnect (physical or transfer failure).
+     *
+     * Substring classification, so it is inherently incomplete — any new or reworded error
+     * string silently stops matching. Callers must therefore treat a `false` here as "not
+     * recognized", NOT as "do not retry"; see the `hadPriorSession` fallback at the call site
+     * in [handleError]. Prefer widening this over relying on the fallback: the fallback only
+     * applies once a session has been established.
      */
     private fun isUsbDisconnectError(error: String): Boolean {
         val lowerError = error.lowercase()
@@ -2905,7 +2980,10 @@ class CarlinkManager(
      *
      * Gives up after MAX_RECONNECT_ATTEMPTS to prevent infinite loops.
      */
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(
+        retryLabel: String = "Reconnecting",
+        giveUpMessageOverride: String? = null,
+    ) {
         // Cancel any existing reconnect attempt
         reconnectJob?.cancel()
 
@@ -2915,7 +2993,7 @@ class CarlinkManager(
                     "noResponse=$consecutiveNoResponse shortSessions=$shortLivedStreamingCount hadPrior=$hadPriorSession",
                 tag = Logger.Tags.USB,
             )
-            val giveUpMessage = when {
+            val giveUpMessage = giveUpMessageOverride ?: when {
                 consecutiveNoResponse >= 2 -> "Adapter not responding — reboot adapter"
                 shortLivedStreamingCount >= SHORT_SESSION_ESCALATION_COUNT -> "Connection unstable — reboot adapter"
                 hadPriorSession -> "Phone not reconnecting — reboot adapter"
@@ -2949,7 +3027,7 @@ class CarlinkManager(
             tag = Logger.Tags.USB,
         )
 
-        setStatusText("Reconnecting ($reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)...")
+        setStatusText("$retryLabel ($reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)...")
 
         reconnectJob =
             scope.launch {
@@ -2960,6 +3038,16 @@ class CarlinkManager(
                     logInfo("[RECONNECT] Attempting reconnection...", tag = Logger.Tags.USB)
                     try {
                         withContext(Dispatchers.IO) { start() }
+                    } catch (e: CancellationException) {
+                        // Expected, not a failure. When start() fails it routes through
+                        // handleError -> scheduleReconnect, whose first act is
+                        // `reconnectJob?.cancel()` — and reconnectJob IS this coroutine. So the
+                        // successor attempt cancels its own predecessor as it is scheduled.
+                        // The replacement job has already been launched from `scope` (not as a
+                        // child of this one), so the chain continues normally. Logging this as
+                        // "Reconnection failed" made a healthy retry chain read like a cascade
+                        // of errors in bug reports.
+                        logDebug("[RECONNECT] Attempt superseded by a newly scheduled retry", tag = Logger.Tags.USB)
                     } catch (e: Exception) {
                         logError("[RECONNECT] Reconnection failed: ${e.message}", tag = Logger.Tags.USB)
                         // handleError will be called by start() failure, which will schedule next attempt

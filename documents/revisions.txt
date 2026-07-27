@@ -745,3 +745,38 @@
      build + merged-manifest inspection only.
    - Affected: AndroidManifest.xml, platform/PlatformDetector.kt, platform/AudioConfig.kt,
      media/CarlinkMediaBrowserService.kt, CarlinkManager.kt
+
+[148] :: Connection robustness pass: retry the dead-ends, guard the FGS start, stop silent no-retry.
+   - Motivation: connection was hit-or-miss. Four independent paths could leave the app parked with no retry.
+   - DEAD-END 1: start() -> findDevice() null set DISCONNECTED, "Adapter not found", and returned. No retry.
+   - Races that hit it: manifest USB_DEVICE_ATTACHED foregrounds MainActivity (which auto-starts) before the
+     device node is claimable; and the adapter fully re-enumerates after every config "Apply & Restart".
+   - Now schedules a retry ("Searching for adapter (n/5)"), give-up text "Adapter not found — check that it is plugged in".
+   - DEAD-END 2: openWithPermission() false set "USB permission denied" for ANY open failure and returned.
+   - That string is wrong for the common case: permission held, openDevice()/claimInterface() failed while the
+     adapter was still settling. Sent people chasing a permission problem that did not exist.
+   - Now re-checks hasPermission() to split the two. Genuine denial stays terminal ON PURPOSE — auto-retry would
+     re-show the system dialog every attempt. Transient open failure retries as "Opening adapter (n/5)".
+   - FGS GUARD: startConnectionForeground() called startForegroundService() with no try/catch.
+   - Android 12+ throws ForegroundServiceStartNotAllowedException with no foreground activity + no exemption.
+   - Reachable from scheduleReconnect(), which is exactly when the app is likely backgrounded (GM native screen,
+     radio, backup camera). The throw aborted the retry at the moment the retry was load-bearing.
+   - Now caught and logged WARN; reconnect proceeds at normal priority (LMK-killable, but alive).
+   - SILENT NO-RETRY: handleError only scheduled a reconnect when isUsbDisconnectError() substring-matched.
+   - Unmatched wording -> no retry AND no log. Identical faults recovered or did not, purely on error phrasing.
+   - Added `|| hadPriorSession` fallback (hardware path proven good this episode -> retry is the better default)
+     and an explicit WARN naming the error when we decline. No more invisible give-up.
+   - ESCALATION RESET: after give-up, adapterDriver is null, so start() skips stop() — the only other reset path.
+   - consecutiveNoResponse / shortLivedStreamingCount therefore survived into the user's next manual attempt,
+     which then reported "reboot adapter" on its first failure. Author had flagged this as surprising in-code.
+   - start() gained userInitiated (default false). True from: Connect/surface-ready (MainScreen), USB re-attach
+     (MainActivity), and Reset Device (restart()). The automatic retry loop keeps false so escalation still works.
+   - LOG NOISE: reconnect chain self-cancels — scheduleReconnect()'s first act is reconnectJob?.cancel(), and
+     reconnectJob is the coroutine calling it via start() -> handleError. Successor cancels predecessor.
+   - The resulting CancellationException was logged as "Reconnection failed", so a HEALTHY retry chain read as a
+     cascade of errors. Now caught separately and logged at DEBUG as "superseded". Replacement job is launched
+     from `scope`, not as a child, so the chain was never actually broken.
+   - NOT CHANGED: backoff schedule, MAX_RECONNECT_ATTEMPTS, escalation thresholds, Pattern A/C semantics.
+   - UNVERIFIED ON HARDWARE: no VCU unit on hand. Reasoned from the code paths and AOSP contracts.
+   - NO TEST COVERAGE: repo still has zero test sources.
+   - Affected: CarlinkManager.kt, media/CarlinkMediaBrowserService.kt, MainActivity.kt, ui/MainScreen.kt
