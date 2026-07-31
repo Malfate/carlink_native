@@ -104,12 +104,29 @@
                 <category android:name="android.intent.category.CAR_MODE" />
             </intent-filter>
 
-            <!-- AAOS Media App Intent Filter -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.APP_MUSIC" />
-            </intent-filter>
+            <!-- NO android.intent.category.APP_MUSIC filter here — removed deliberately in [151].
+                 DO NOT RE-ADD without reading this.
 
+                 CATEGORY_APP_MUSIC is the API 15 phone-era selector (sibling of APP_BROWSER /
+                 APP_CALENDAR / APP_EMAIL) that lets the system launch "the music app" generically
+                 via Intent.makeMainSelectorActivity. It predates AAOS media sources and is not
+                 part of that contract — Media Center listing comes from the MediaBrowserService
+                 intent-filter below plus <uses name="media"/> in @xml/automotive_app_desc (see
+                 that file's comment, which names both mechanisms and does not mention this one).
+
+                 It was original scaffolding, never revisited, and nothing referenced it: no Kotlin
+                 reads it, and the one deliberate attempt to use the MAIN+APP_MUSIC intent path is
+                 recorded as a FAILED workaround in MediaSessionManager's KDoc. What it did cost
+                 was a duplicate launcher icon on GM AAOS, which renders APP_MUSIC activities as a
+                 second media-category entry alongside the normal LAUNCHER one.
+
+                 Beyond the icon: carlink is a projection bridge, not a music app. Claiming the
+                 generic music-app role competes with the head unit's own media apps for a
+                 system-level slot, and with no phone attached it resolves to a "Not connected"
+                 screen. Removing the LAUNCHER filter is NOT an equivalent alternative — that one
+                 is the app's real entry point, and it is also what makes carlink a dual-role
+                 (launcher + MBS) app, which is why the androidx.car.app.launchable opt-in on the
+                 service below is still required. -->
             <!-- USB Device Attachment -->
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />

@@ -843,3 +843,38 @@
        "[AUDIO_FOCUS] FocusChange(MEDIA): LOSS"                   = something took focus from us
        "[MEDIA_SESSION] Transport command [PLAY_PAUSE] from ..."  = names who paused the phone
    - Affected: audio/DualStreamAudioManager.kt, media/MediaSessionManager.kt, logging/LogPreset.kt
+
+[151] :: Removed the APP_MUSIC intent filter — duplicate launcher icon on GM AAOS, no purpose.
+   - Field report: two Carlink icons on the truck's app grid.
+   - Cause: MainActivity carried BOTH android.intent.category.LAUNCHER and
+     android.intent.category.APP_MUSIC. GM AAOS renders APP_MUSIC activities as a second,
+     media-category entry alongside the normal launcher one.
+   - Investigated before removing, because the neighbouring media wiring IS load-bearing:
+     - git log -S shows APP_MUSIC present since Initial Push, never revisited. Its only comment
+       was the label "AAOS Media App Intent Filter" — in a manifest where every other non-obvious
+       entry carries a paragraph citing decompiled GM services or AOSP line numbers.
+     - No Kotlin references it. The single other mention in the tree is MediaSessionManager's
+       KDoc, in the list of workarounds that FAILED ("MAIN+APP_MUSIC self-intent").
+     - automotive_app_desc.xml already documents the mechanism that actually drives Media Center
+       listing: <uses name="media"/> PLUS the MediaBrowserService intent-filter. APP_MUSIC is not
+       named there, and both of those are untouched.
+   - CATEGORY_APP_MUSIC is the API 15 phone-era selector (sibling of APP_BROWSER / APP_CALENDAR)
+     for Intent.makeMainSelectorActivity "launch the music app". It predates AAOS media sources
+     and is not part of that contract.
+   - Considered integrating it instead of removing. Rejected: carlink is a projection bridge, not
+     a music app. Claiming the generic music-app role competes with the head unit's own media apps
+     for a system-level slot — actively wrong while [150] is chasing carlink-vs-native-Spotify
+     media role contention — and with no phone attached it resolves to a "Not connected" screen.
+     Nothing was gained: launcher icon, CAR_MODE filter, media source switcher and USB-attach
+     filter already cover every real entry path.
+   - androidx.car.app.launchable on the MBS is UNCHANGED and still required: MainActivity keeps its
+     LAUNCHER filter, so carlink is still a dual-role (launcher + MBS) app and still needs the
+     isMediaTemplate() opt-in.
+   - Verified in the merged playRelease manifest: zero APP_MUSIC category elements, LAUNCHER and
+     CAR_MODE intact.
+   - TO CONFIRM ON HARDWARE — if any of these regress, revert this commit alone; it does not carry
+     [150]'s audio fix:
+     1. media source switcher still lists Carlink
+     2. homescreen Media card populates with track/artist during playback
+     3. cluster shows the track
+   - Affected: AndroidManifest.xml
