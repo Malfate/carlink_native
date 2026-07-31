@@ -208,6 +208,12 @@ fun LogPreset.apply() {
                     Logger.Tags.USB,
                     Logger.Tags.PLATFORM,
                     Logger.Tags.CONFIG,
+                    // MEDIA_SESSION carries the transport-command origin probe
+                    // (MediaSessionManager.onPlayerCommandRequest). An externally-injected
+                    // pause is an audio-routing event as much as a metadata one — without
+                    // this tag, "audio stopped" traces show the AUDIO_FOCUS side of the
+                    // story but not who asked for the pause that caused it.
+                    Logger.Tags.MEDIA_SESSION,
                 ),
                 true,
             )

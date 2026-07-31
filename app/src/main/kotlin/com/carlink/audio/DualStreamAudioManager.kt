@@ -102,6 +102,34 @@ class DualStreamAudioManager(
     private val focusListeners = mutableMapOf<StreamPurpose, AudioManager.OnAudioFocusChangeListener>()
     private val focusHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * How long MEDIA AudioFocus is held after AUDIO_MEDIA_STOP before it is actually
+     * abandoned.
+     *
+     * The adapter emits AUDIO_MEDIA_STOP on ordinary playback gaps — track changes,
+     * end-of-episode transitions, brief pauses — not only at session end. Abandoning focus
+     * on each of those hands the MEDIA context straight back to AAOS, which is then free to
+     * promote a different media source (head-unit Spotify, radio) and pause the phone
+     * through the MediaSession transport path. Lingering keeps the context anchored across
+     * the gap so an ordinary track transition does not read as "projection stopped".
+     *
+     * This also makes focus lifetime consistent with the AudioTrack lifetime: the MEDIA slot
+     * already writes silence to stay PLAYING through idle gaps (see the playback thread's
+     * idle handling, ~line 1190) specifically so AAOS does not reassign the volume context.
+     * Holding the matching focus request is strictly *less* aggressive than that — AAOS
+     * treats media-vs-media focus as exclusive, so another app requesting AUDIOFOCUS_GAIN
+     * still wins immediately and we still receive the LOSS callback. The linger cannot lock
+     * the user out of the head unit's own media apps.
+     *
+     * 10s covers track/episode transitions and short manual pauses. Past that a source
+     * switch is most likely deliberate and should proceed normally.
+     */
+    private val mediaFocusLingerMs = 10_000L
+
+    /** In-flight deferred MEDIA abandon, or null. Posted to [focusHandler]; both the post
+     *  and the cancel happen under [lock]. */
+    private var pendingMediaFocusAbandon: Runnable? = null
+
     private fun getOrCreateFocusListener(purpose: StreamPurpose): AudioManager.OnAudioFocusChangeListener =
         focusListeners.getOrPut(purpose) {
             AudioManager.OnAudioFocusChangeListener { focusChange ->
@@ -497,6 +525,12 @@ class DualStreamAudioManager(
     /** Request AudioFocus for a stream purpose. */
     fun onPurposeChanged(purpose: StreamPurpose) {
         synchronized(lock) {
+            // Media resumed inside the linger window — keep the focus we are still holding
+            // instead of letting the deferred abandon fire behind the new request.
+            if (purpose == StreamPurpose.MEDIA) {
+                cancelPendingMediaFocusAbandon("media resumed within linger window")
+            }
+
             val gainType =
                 when (purpose) {
                     StreamPurpose.MEDIA -> AudioManager.AUDIOFOCUS_GAIN
@@ -550,14 +584,61 @@ class DualStreamAudioManager(
         }
     }
 
-    /** Abandon AudioFocus for a stream purpose. */
+    /**
+     * Abandon AudioFocus for a stream purpose.
+     *
+     * MEDIA is deferred by [mediaFocusLingerMs] rather than abandoned inline — see that
+     * field for why. Every other purpose is abandoned immediately: they are short-lived
+     * foreground streams whose end really is the end of the stream.
+     */
     fun onPurposeEnded(purpose: StreamPurpose) {
         synchronized(lock) {
-            activeFocusRequests.remove(purpose)?.let { request ->
-                systemAudioManager.abandonAudioFocusRequest(request)
-                logDebug("[AUDIO_FOCUS] Abandon $purpose")
+            if (purpose == StreamPurpose.MEDIA) {
+                // Nothing held (already abandoned, or never granted) — no linger to arm.
+                if (!activeFocusRequests.containsKey(purpose)) {
+                    focusListeners.remove(purpose)
+                    return
+                }
+                cancelPendingMediaFocusAbandon(null)
+                val deferred =
+                    object : Runnable {
+                        override fun run() {
+                            synchronized(lock) {
+                                // Identity guard: a newer linger (or a cancel) supersedes this
+                                // one even if removeCallbacks lost the race to the dispatch.
+                                if (pendingMediaFocusAbandon !== this) return
+                                pendingMediaFocusAbandon = null
+                                abandonFocus(purpose, " (linger ${mediaFocusLingerMs}ms elapsed)")
+                            }
+                        }
+                    }
+                pendingMediaFocusAbandon = deferred
+                focusHandler.postDelayed(deferred, mediaFocusLingerMs)
+                logDebug("[AUDIO_FOCUS] MEDIA end deferred ${mediaFocusLingerMs}ms (linger armed)")
+                return
             }
-            focusListeners.remove(purpose)
+            abandonFocus(purpose, "")
+        }
+    }
+
+    /** Release the focus request for [purpose]. Caller holds [lock]. */
+    private fun abandonFocus(
+        purpose: StreamPurpose,
+        note: String,
+    ) {
+        activeFocusRequests.remove(purpose)?.let { request ->
+            systemAudioManager.abandonAudioFocusRequest(request)
+            logDebug("[AUDIO_FOCUS] Abandon $purpose$note")
+        }
+        focusListeners.remove(purpose)
+    }
+
+    /** Cancel an armed deferred MEDIA abandon, if any. Caller holds [lock]. */
+    private fun cancelPendingMediaFocusAbandon(reason: String?) {
+        pendingMediaFocusAbandon?.let { pending ->
+            focusHandler.removeCallbacks(pending)
+            pendingMediaFocusAbandon = null
+            if (reason != null) logDebug("[AUDIO_FOCUS] MEDIA linger cancelled ($reason)")
         }
     }
 
@@ -769,6 +850,10 @@ class DualStreamAudioManager(
             alertSlot = null
 
             releaseNavTrack()
+
+            // Drop any armed MEDIA linger before the bulk abandon below, so the deferred
+            // Runnable cannot fire against a released AudioManager after teardown.
+            cancelPendingMediaFocusAbandon(null)
 
             // Abandon all AudioFocus requests
             for ((purpose, request) in activeFocusRequests) {

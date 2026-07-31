@@ -635,6 +635,45 @@ class MediaSessionManager(
         }
 
         /**
+         * Transport-command origin probe — logging only, changes no behavior.
+         *
+         * Every play/pause/stop that reaches [UsbAdapterPlayer] is forwarded to the phone as
+         * a USB key command ([UsbAdapterPlayer.handleSetPlayWhenReady] →
+         * CarlinkManager.sendKey). By the time it lands there the caller is gone, so an
+         * AAOS-initiated "pause the demoted media source" and a genuine user pause are
+         * indistinguishable in the log. This callback still carries the requesting
+         * [MediaSession.ControllerInfo], so the log line names the package that asked.
+         *
+         * Diagnostic value: when chasing "CarPlay audio stops on its own", look for a
+         * PLAY_PAUSE from `com.android.car.media` or a `com.gm.*` package next to the
+         * dropout. That is the head unit pausing the phone as a media-source arbitration
+         * side effect, not the phone pausing itself — a distinction that otherwise needs
+         * `dumpsys car_media` sampled at exactly the right moment.
+         *
+         * Fires after the Player has applied the interaction, so this line lands just after
+         * the corresponding `onPlay`/`onPause received` line — read them as a pair.
+         *
+         * API note: the obvious hook here is `onPlayerCommandRequest`, which is deprecated
+         * as of Media3 1.10.0. This is its live replacement. It reports the commands that
+         * were actually applied rather than one requested command, hence the set-valued
+         * [Player.Commands] parameter.
+         */
+        override fun onPlayerInteractionFinished(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommands: Player.Commands,
+        ) {
+            val names = (0 until playerCommands.size())
+                .joinToString(",") { playerCommandName(playerCommands.get(it)) }
+            log(
+                "[MEDIA_SESSION] Transport command [$names] " +
+                    "from ${controller.packageName} uid=${controller.uid} " +
+                    "ifaceVer=${controller.interfaceVersion}",
+            )
+            super.onPlayerInteractionFinished(session, controller, playerCommands)
+        }
+
+        /**
          * Subscription handler — logging-only override; behavior is delegated to the default
          * implementation.
          *
@@ -1258,6 +1297,24 @@ class MediaSessionManager(
     private fun log(message: String) {
         if (BuildConfig.DEBUG) Log.d(TAG, message)
         logCallback.log(message)
+    }
+
+    /**
+     * Human-readable [Player.Command] name for the transport-origin probe. Covers the
+     * commands this session advertises plus SET_MEDIA_ITEM, which is deliberately not
+     * advertised but worth naming if a controller ever attempts it. Anything else falls
+     * back to the raw constant.
+     */
+    private fun playerCommandName(command: Int): String = when (command) {
+        Player.COMMAND_PLAY_PAUSE -> "PLAY_PAUSE"
+        Player.COMMAND_STOP -> "STOP"
+        Player.COMMAND_PREPARE -> "PREPARE"
+        Player.COMMAND_SEEK_TO_NEXT -> "SEEK_TO_NEXT"
+        Player.COMMAND_SEEK_TO_PREVIOUS -> "SEEK_TO_PREVIOUS"
+        Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> "SEEK_TO_NEXT_MEDIA_ITEM"
+        Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> "SEEK_TO_PREVIOUS_MEDIA_ITEM"
+        Player.COMMAND_SET_MEDIA_ITEM -> "SET_MEDIA_ITEM"
+        else -> "COMMAND_$command"
     }
 
     /**

@@ -805,3 +805,41 @@
    - UNVERIFIED ON HARDWARE: still no VCU unit. "[PLATFORM] Detected:" (unconditional since [147]) is
      the confirmation — check gm=true, then gmAudioFixes / vcu / immersive.
    - Affected: platform/PlatformDetector.kt
+
+[150] :: Audio source fighting: hold MEDIA focus across playback gaps, and log who pauses us.
+   - Field report: Spotify over CarPlay drops out mid-drive, most often at end-of-episode/track
+     boundaries. Resuming from the CarPlay UI plays 1-2s then stops. User theory was Spotify Connect
+     transferring the session to the head unit's native Spotify. Plausible, but the trigger looks
+     upstream of that, and this app is a participant.
+   - HYPOTHESIS, NOT YET CONFIRMED ON HARDWARE. Both changes below are safe if the theory is wrong:
+     the first is a no-op unless MEDIA_STOP actually fires on gaps, the second is logging only.
+   - Change 1 (DualStreamAudioManager): AUDIO_MEDIA_STOP no longer abandons MEDIA AudioFocus inline.
+     It arms a 10s linger (mediaFocusLingerMs) which AUDIO_MEDIA_START cancels.
+     - The adapter emits MEDIA_STOP on ordinary gaps, not only at session end. Abandoning on each
+       hands the MEDIA context back to AAOS, which can then promote another media source and pause
+       the phone back through our own MediaSession transport path.
+     - This also removes a contradiction that was already in the file: the MEDIA slot deliberately
+       writes silence to stay PLAYING through idle gaps so AAOS does not reassign the volume context,
+       while the matching focus request was being dropped on those same gaps.
+     - Not a lockout risk: AAOS treats media-vs-media focus as exclusive, so another app requesting
+       AUDIOFOCUS_GAIN still wins immediately and we still get the LOSS callback. The linger is
+       strictly less aggressive than the silence-write behavior that was already shipping.
+     - Deferred abandon is identity-guarded and cancelled in release() so it cannot fire post-teardown.
+   - Change 2 (MediaSessionManager): added onPlayerInteractionFinished to log the controller package
+     behind every transport command.
+     - Any trusted controller's pause becomes a USB PAUSE key to the phone (UsbAdapterPlayer
+       handleSetPlayWhenReady -> CarlinkManager.sendKey). By the time it reaches the Player the caller
+       is gone, so an AAOS-initiated pause and a genuine user pause looked identical in the log.
+     - Read the new line next to "onPause received". A PLAY_PAUSE from com.android.car.media or a
+       com.gm.* package means the head unit paused the phone, and Spotify Connect is not the cause.
+     - Used onPlayerInteractionFinished, not onPlayerCommandRequest: the latter is deprecated as of
+       Media3 1.10.0.
+   - Change 3 (LogPreset): AUDIO_ONLY now enables the MEDIA_SESSION tag, so one preset captures both
+     the AUDIO_FOCUS trace and the transport-command origin. Previously the two lived in AUDIO_ONLY
+     and CLUSTER_MEDIA respectively and no single preset showed both.
+   - TO CONFIRM ON HARDWARE: Settings > Logs, preset "Audio Only", enable file logging, drive, export
+     after a dropout. Ordering tells the story:
+       "[AUDIO_CMD] Media audio STOP" -> "MEDIA linger armed"     = we no longer release on the gap
+       "[AUDIO_FOCUS] FocusChange(MEDIA): LOSS"                   = something took focus from us
+       "[MEDIA_SESSION] Transport command [PLAY_PAUSE] from ..."  = names who paused the phone
+   - Affected: audio/DualStreamAudioManager.kt, media/MediaSessionManager.kt, logging/LogPreset.kt
